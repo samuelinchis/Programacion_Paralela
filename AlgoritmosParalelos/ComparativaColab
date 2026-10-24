@@ -1,0 +1,329 @@
+import math
+import heapq
+import itertools
+import os
+import random
+import time
+from contextlib import contextmanager
+from multiprocessing import get_context, shared_memory
+
+import numpy as np
+import pandas as pd
+
+CTX = get_context("fork")
+WORKERS = os.cpu_count() or 1          # procesos reales (p) de la versión paralela
+
+# ----------------------------------------------------------------------------
+# PARÁMETROS DEL BENCHMARK (ajústalos a gusto)
+# ----------------------------------------------------------------------------
+SIZES_ODD_EVEN = [2_000, 4_000, 8_000, 16_000]           # n elementos
+SIZES_MERGE_SPLIT = [200_000, 1_000_000, 2_000_000]      # n elementos
+N_LOGICAL = [2, 4, 8]                                    # N bloques (procesadores lógicos) de mezcla-división
+ITEMS_BB = [20, 24, 28]                                  # nº de ítems de la mochila para B&B
+REPEATS = 3                                              # repeticiones por medición (se toma la mínima)
+
+
+# ----------------------------------------------------------------------------
+# Utilidades de memoria compartida + pool
+# ----------------------------------------------------------------------------
+_shm = None
+_arr = None
+
+
+def _init_worker(name, n, dtype_str):
+    global _shm, _arr
+    _shm = shared_memory.SharedMemory(name=name)
+    _arr = np.ndarray((n,), dtype=np.dtype(dtype_str), buffer=_shm.buf)
+
+
+def _noop(_):
+    return 0
+
+
+@contextmanager
+def shared_pool(data, p):
+    """Copia `data` a memoria compartida y crea un pool de p procesos que la ven. Cede (arr, pool)."""
+    shm = shared_memory.SharedMemory(create=True, size=data.nbytes)
+    arr = np.ndarray(data.shape, dtype=data.dtype, buffer=shm.buf)
+    arr[:] = data
+    pool = CTX.Pool(p, initializer=_init_worker, initargs=(shm.name, len(data), data.dtype.str))
+    try:
+        pool.map(_noop, range(p))          # calentamiento: los workers ya están listos
+        yield arr, pool
+    finally:
+        pool.close()
+        pool.join()
+        del arr
+        try:
+            shm.close()
+        except BufferError:
+            pass
+        shm.unlink()
+
+
+'''
+
+s12='''# ============================================================================
+# 1) TRANSPOSICIÓN IMPAR-PAR
+#    ceil(n/2) ciclos, cada uno con fase impar y fase par (n fases). En cada fase los pares
+#    (i, i+1) son independientes: la versión paralela los reparte entre p procesos.
+#    NOTA: en el pseudocódigo el límite de la fase impar 2*floor((n-1)/2)-1 omite el último par
+#    cuando n es par; aquí se cubren todos los pares (1,2),(3,4),... (1-indexado).
+# ============================================================================
+def _oe_chunk(arr, s, q0, q1):
+    """Compara-intercambia los pares q0..q1-1 de la fase que empieza en s (0-indexado)."""
+    lo, hi = s + 2 * q0, s + 2 * q1
+    left, right = arr[lo:hi:2], arr[lo + 1:hi:2]
+    mn, mx = np.minimum(left, right), np.maximum(left, right)   # if x_i > x_{i+1}: intercambiar
+    arr[lo:hi:2] = mn
+    arr[lo + 1:hi:2] = mx
+
+
+def _oe_task(args):
+    _oe_chunk(_arr, *args)
+
+
+def odd_even_sequential(data):
+    """Versión secuencial (1 proceso). Devuelve (resultado, segundos)."""
+    a = data.copy()
+    n = len(a)
+    t0 = time.perf_counter()
+    for _ in range(math.ceil(n / 2)):
+        for s in (0, 1):                   # 0 = fase impar, 1 = fase par
+            m = (n - s) // 2
+            if m:
+                _oe_chunk(a, s, 0, m)
+    return a, time.perf_counter() - t0
+
+
+def odd_even_parallel(data, p):
+    """Versión paralela: en cada fase los pares se reparten entre p procesos. Devuelve (resultado, segundos)."""
+    n = len(data)
+    with shared_pool(data, p) as (arr, pool):
+        t0 = time.perf_counter()
+        for _ in range(math.ceil(n / 2)):
+            for s in (0, 1):
+                m = (n - s) // 2
+                cuts = np.linspace(0, m, p + 1).astype(int)
+                tasks = [(s, int(cuts[k]), int(cuts[k + 1])) for k in range(p) if cuts[k + 1] > cuts[k]]
+                if tasks:
+                    pool.map(_oe_task, tasks, chunksize=1)   # barrera de sincronización por fase
+        elapsed = time.perf_counter() - t0
+        result = arr.copy()
+        del arr
+    return result, elapsed
+
+
+# ============================================================================
+# 2) MEZCLA-DIVISIÓN (merge-split) con N bloques
+#    Se rellena con centinelas (max+1) hasta que n sea múltiplo de N, porque el algoritmo
+#    supone bloques iguales de n/N; con bloques desiguales puede no ordenar bien.
+# ============================================================================
+def ms_sort_block(arr, a, b):
+    arr[a:b].sort()                        # QUICKSORT(S_i) (introsort de numpy)
+
+
+def ms_merge_pair(arr, a, m, b):
+    """SEQUENTIAL MERGE(S_i, S_{i+1}, S') y división: S_i <- mitad menor, S_{i+1} <- mitad mayor."""
+    merged = np.concatenate((arr[a:m], arr[m:b]))
+    merged.sort(kind="stable")             # timsort: mezcla lineal de dos corridas ordenadas
+    arr[a:b] = merged
+
+
+def _ms_sort_task(bounds):
+    ms_sort_block(_arr, *bounds)
+
+
+def _ms_merge_task(bounds):
+    ms_merge_pair(_arr, *bounds)
+
+
+def _ms_prepare(data, N):
+    pad = (-len(data)) % N
+    padded = np.concatenate((data, np.full(pad, data.max() + 1, dtype=data.dtype)))
+    edges = np.linspace(0, len(padded), N + 1).astype(int)
+    blocks = [(int(edges[i]), int(edges[i + 1])) for i in range(N)]
+    return padded, blocks
+
+
+def _ms_subphases(blocks):
+    """Genera, por subfase (impares y pares de cada ciclo), la lista de parejas (a, m, b) a mezclar."""
+    N = len(blocks)
+    for _ in range(math.ceil(N / 2)):
+        for s in (0, 1):
+            pairs = [(blocks[i][0], blocks[i][1], blocks[i + 1][1]) for i in range(s, N - 1, 2)]
+            if pairs:
+                yield pairs
+
+
+def merge_split_sequential(data, N):
+    """Versión secuencial: los N 'procesadores' se ejecutan uno tras otro en 1 proceso."""
+    padded, blocks = _ms_prepare(data, N)
+    t0 = time.perf_counter()
+    for b in blocks:
+        ms_sort_block(padded, *b)
+    for pairs in _ms_subphases(blocks):
+        for pr in pairs:
+            ms_merge_pair(padded, *pr)
+    return padded[:len(data)].copy(), time.perf_counter() - t0
+
+
+def merge_split_parallel(data, N, p):
+    """Versión paralela: bloques/parejas repartidos entre p procesos reales."""
+    padded, blocks = _ms_prepare(data, N)
+    with shared_pool(padded, p) as (arr, pool):
+        t0 = time.perf_counter()
+        pool.map(_ms_sort_task, blocks, chunksize=1)
+        for pairs in _ms_subphases(blocks):
+            pool.map(_ms_merge_task, pairs, chunksize=1)
+        elapsed = time.perf_counter() - t0
+        result = arr[:len(data)].copy()
+        del arr
+    return result, elapsed
+
+
+'''
+
+bench='''# ============================================================================
+# MODELOS TEÓRICOS (T en "operaciones"; solo importa la razón T_seq / T_par)
+# ============================================================================
+def T_odd_even(n, p):
+    """n fases; en cada una, ~n/2 comparaciones repartidas entre p procesadores."""
+    return n * math.ceil((n // 2) / p)
+
+
+def T_merge_split(n, N, p):
+    """Ordenamiento local de N bloques + N fases de N//2 mezclas de 2n/N elementos, sobre p procesadores."""
+    m = n / N
+    local = math.ceil(N / p) * m * math.log2(max(m, 2))
+    merges = N * math.ceil((N // 2) / p) * 2 * m
+    return local + merges
+
+
+def T_bb(nodos_seq, p):
+    """Ideal: los nodos se expanden en rondas de p vértices."""
+    return math.ceil(nodos_seq / p)
+
+
+# ============================================================================
+# BENCHMARK  (cada algoritmo: secuencial vs paralelo del MISMO algoritmo)
+# ============================================================================
+def best_of(fn, repeats=REPEATS):
+    best, out = math.inf, None
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        out = fn()
+        best = min(best, time.perf_counter() - t0)
+    return best, out
+
+
+def best_timed(fn, repeats=REPEATS):
+    """fn devuelve (resultado, segundos). Devuelve (mejor tiempo, resultado)."""
+    best, out = math.inf, None
+    for _ in range(repeats):
+        out, t = fn()
+        best = min(best, t)
+    return best, out
+
+
+def fila(alg, tam, p, t_seq, t_par, T_seq, T_par):
+    sp, sp_t = t_seq / t_par, T_seq / T_par
+    t_teo = t_seq * T_par / T_seq          # tiempo paralelo predicho: t_seq medido x (T_par / T_seq)
+    return {"algoritmo": alg, "tamaño": tam, "p": p,
+            "t_seq (s)": t_seq, "t_par (s)": t_par,
+            "speedup real": sp, "speedup teórico": sp_t, "eficiencia real": sp / p,
+            "t_par teórico (s)": t_teo, "error %": 100 * (t_par - t_teo) / t_teo}
+
+
+def bench_odd_even(p):
+    rows = []
+    for n in SIZES_ODD_EVEN:
+        data = np.random.default_rng(1).integers(0, 10**9, n)
+        ref = np.sort(data)
+        t_s, (r, _) = best_timed(lambda: odd_even_sequential(data)), (None, None)
+        t_s, r = best_timed(lambda: odd_even_sequential(data))
+        assert np.array_equal(r, ref), "Impar-par secuencial no ordenó bien"
+        t_p, r = best_timed(lambda: odd_even_parallel(data, p))
+        assert np.array_equal(r, ref), "Impar-par paralelo no ordenó bien"
+        rows.append(fila("Transposición impar-par", f"n={n}", p, t_s, t_p, T_odd_even(n, 1), T_odd_even(n, p)))
+    return pd.DataFrame(rows)
+
+
+def bench_merge_split(p):
+    rows = []
+    for N in N_LOGICAL:
+        for n in SIZES_MERGE_SPLIT:
+            data = np.random.default_rng(2).integers(0, 10**9, n)
+            ref = np.sort(data)
+            t_s, r = best_timed(lambda: merge_split_sequential(data, N))
+            assert np.array_equal(r, ref), "Merge-split secuencial no ordenó bien"
+            t_p, r = best_timed(lambda: merge_split_parallel(data, N, p))
+            assert np.array_equal(r, ref), "Merge-split paralelo no ordenó bien"
+            rows.append(fila("Mezcla-división", f"n={n}, N={N}", p, t_s, t_p,
+                             T_merge_split(n, N, 1), T_merge_split(n, N, p)))
+    return pd.DataFrame(rows)
+
+
+def bench_bb(p):
+    rows, det = [], []
+    for k in ITEMS_BB:
+        w, v, cap = make_knapsack(k)
+        t_s, (opt_s, nodes_s, rounds_s) = best_of(lambda: branch_and_bound(w, v, cap, 1), repeats=1)
+        with CTX.Pool(p, initializer=_init_bb, initargs=(w, v, cap)) as pool:
+            pool.map(_noop, range(p))
+            t_p, (opt_p, nodes_p, rounds_p) = best_of(lambda: branch_and_bound(w, v, cap, p, pool), repeats=1)
+        assert opt_s == opt_p, "Los óptimos difieren"
+        rows.append(fila("B&B paralelo (mochila)", f"{k} ítems", p, t_s, t_p, nodes_s, T_bb(nodes_s, p)))
+        det.append({"ítems": k, "óptimo": opt_s, "nodos seq": nodes_s, "nodos par": nodes_p,
+                    "rondas seq": rounds_s, "rondas par": rounds_p,
+                    "rondas teóricas ceil(nodos_seq/p)": T_bb(nodes_s, p)})
+    return pd.DataFrame(rows), pd.DataFrame(det)
+
+
+def show(df):
+    try:
+        from IPython.display import display
+        display(df)
+    except ImportError:
+        print(df.to_string(index=False))
+
+
+def graficar(df):
+    import matplotlib.pyplot as plt
+    etiquetas = df["algoritmo"].str.split(" ").str[0] + "\\n" + df["tamaño"]
+    x = np.arange(len(df))
+    fig, ax = plt.subplots(1, 2, figsize=(max(10, len(df) * 0.9), 4.5))
+    ax[0].bar(x - 0.2, df["t_seq (s)"], 0.4, label="secuencial")
+    ax[0].bar(x + 0.2, df["t_par (s)"], 0.4, label="paralelo")
+    ax[0].set_yscale("log"); ax[0].set_ylabel("tiempo (s, escala log)"); ax[0].set_title("Tiempo real")
+    ax[1].bar(x - 0.2, df["speedup real"], 0.4, label="real")
+    ax[1].bar(x + 0.2, df["speedup teórico"], 0.4, label="teórico")
+    ax[1].axhline(1, color="gray", ls="--", lw=1); ax[1].set_title("Speedup (>1 = el paralelo gana)")
+    for a in ax:
+        a.set_xticks(x); a.set_xticklabels(etiquetas, rotation=90, fontsize=7); a.legend()
+    plt.tight_layout(); plt.show()
+
+
+if __name__ == "__main__":
+    pd.set_option("display.width", 250)
+    pd.set_option("display.max_columns", 30)
+    p = WORKERS
+    print(f"Procesos reales para la versión paralela: p = {p}")
+    if p < 2:
+        print("AVISO: solo hay 1 núcleo; el speedup no puede superar 1.\\n")
+
+    print("\\n=== 1) Transposición impar-par: secuencial vs paralela ===")
+    d1 = bench_odd_even(p); show(d1.round(4))
+    print("\\n=== 2) Mezcla-división: secuencial vs paralela ===")
+    d2 = bench_merge_split(p); show(d2.round(4))
+    print("\\n=== 3) Ramificación y acotación: secuencial vs paralela ===")
+    d3, d3_det = bench_bb(p); show(d3.round(4)); print("\\nDetalle B&B:"); show(d3_det)
+
+    resumen = pd.concat([d1, d2, d3], ignore_index=True)
+    resumen.to_csv("comparativa_seq_vs_par.csv", index=False)
+    d3_det.to_csv("detalle_bb.csv", index=False)
+    print("\\nCSV guardados: comparativa_seq_vs_par.csv, detalle_bb.csv")
+    try:
+        graficar(resumen)
+    except Exception as e:
+        print("No se pudo graficar:", e)
