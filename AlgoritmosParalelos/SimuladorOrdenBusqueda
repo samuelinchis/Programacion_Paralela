@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Simulador de algoritmos paralelos</title>
+<style>
+:root{--bg:#fff;--fg:#1d2433;--mut:#6b7385;--card:#f4f6fa;--bd:#d5dae5;--bar:#9aa7c4}
+@media(prefers-color-scheme:dark){:root{--bg:#14171f;--fg:#e6e9f2;--mut:#98a0b3;--card:#1e222d;--bd:#343a4a;--bar:#5a6684}}
+body{margin:0;padding:16px;font:14px system-ui,sans-serif;background:var(--bg);color:var(--fg);max-width:1100px;margin:auto}
+h1{font-size:20px;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:10px;margin-bottom:10px}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:end}
+label{display:flex;flex-direction:column;font-size:12px;color:var(--mut);gap:3px}
+input,select,button{font:inherit;padding:6px 8px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--fg)}
+input[type=number]{width:70px}
+button{cursor:pointer}button:disabled{opacity:.4;cursor:default}
+.mut{color:var(--mut);font-size:12px;margin:0 0 8px}
+.chip{display:inline-block;background:var(--bg);border:1px solid var(--bd);border-radius:12px;padding:3px 10px;margin:0 6px 4px 0}
+#viz{display:flex;gap:18px;align-items:flex-end;justify-content:center;min-height:200px;overflow-x:auto;padding-top:8px}
+.blk{display:flex;flex-direction:column;align-items:center}
+.bars{display:flex;gap:3px;align-items:flex-end;height:185px}
+.bar{width:26px;min-width:12px;background:var(--bar);border-radius:3px 3px 0 0;position:relative;transition:height .2s}
+.bar span{position:absolute;top:-14px;left:0;right:0;text-align:center;font-size:10px}
+.bar.sw{outline:3px solid var(--fg)}.bar.ok{background:#3cb44b}
+.lab{font-size:12px;color:var(--mut);margin-top:4px}
+#log{max-height:260px;overflow:auto;font-family:ui-monospace,monospace;font-size:12px}
+.lg{padding:5px 0;border-bottom:1px solid var(--bd);color:var(--mut)}.lg.now{color:var(--fg)}
+</style></head><body>
+<h1>Simulador de algoritmos paralelos</h1>
+<div class="card row">
+ <label>Algoritmo<select id="alg"><option value="oe">Transposición impar-par</option><option value="ms">Mezcla-división</option><option value="bb">Ramificación y acotación (B&amp;B)</option></select></label>
+ <label>Tamaño<input id="n" type="number" value="12" min="2" max="32"></label>
+ <label>Hilos<input id="h" type="number" value="3" min="1" max="16"></label>
+ <button id="gen">🎲 Generar arreglo</button>
+ <label style="flex:1;min-width:220px">Arreglo (editable)<input id="arr" style="width:100%"></label>
+ <button id="apply">Aplicar</button>
+</div>
+<p class="mut" id="hint"></p>
+<div class="card row">
+ <button id="reset">⏮ Reiniciar</button><button id="prev">◀ Atrás</button><button id="next">Paso ▶</button><button id="play">▶ Animar</button>
+ <label>Velocidad<input id="spd" type="range" min="1" max="100" value="60"></label>
+ <b id="step"></b>
+</div>
+<div class="card"><div id="stats"></div><div id="viz"></div><div id="info" class="mut"></div></div>
+<div class="card"><b>Registro (comparaciones, divisiones y resultados)</b><div id="log"></div></div>
+<script>
+const $=id=>document.getElementById(id),COL=['#e6194b','#3cb44b','#f58231','#4363d8','#911eb4','#0aa5a5','#c9a800','#f032e6'];
+const rnd=(a,b)=>a+Math.floor(Math.random()*(b-a+1)),esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+let F=[],cur=0,timer=null,NODES=[];
+const HINT={oe:'Hilos = comparaciones simultáneas por paso (cada hilo tiene un color; borde grueso = intercambio). Una fase impar y una par por ciclo, ⌈n/2⌉ ciclos.',
+ms:'Hilos = N procesadores (bloques S₁…S_N, entre 2 y 8). Primero QUICKSORT local; luego ⌈N/2⌉ ciclos de mezcla-división impar/par. Cada pareja que se mezcla comparte color.',
+bb:'Hilos = W procesadores que expanden vértices a la vez. Formato valor:peso separados por coma (máx. 7 ítems). Mochila 0/1: se minimiza f = −valor, g = cota inferior.'};
+
+function simOE(a,T){a=a.slice();const n=a.length,C=Math.ceil(n/2);let cmp=0,sw=0;const R=[];
+ const push=(hl,log,t,done)=>R.push({kind:'bars',arr:a.slice(),sizes:[n],hl,log,title:t,done,stats:[['Comparaciones',cmp],['Intercambios',sw]]});
+ push({},['Arreglo inicial: '+a.join(', ')],'Inicio');
+ for(let c=1;c<=C;c++)for(let ph=0;ph<2;ph++){const pairs=[];for(let i=ph;i+1<n;i+=2)pairs.push(i);
+  for(let g=0;g<pairs.length;g+=T){const hl={},log=[];
+   pairs.slice(g,g+T).forEach((i,k)=>{cmp++;const x=a[i],y=a[i+1],s=x>y;if(s){a[i]=y;a[i+1]=x;sw++}hl[i]=hl[i+1]=[k,s];
+    log.push(`H${k+1}: compara x${i+1}=${x} con x${i+2}=${y} → ${s?'intercambia':'sin cambio'}`)});
+   push(hl,log,`Ciclo ${c}/${C} · fase ${ph?'par':'impar'}`)}}
+ push({},['Resultado: '+a.join(', '),'Ordenado: '+a.every((v,i)=>!i||a[i-1]<=v)],'Fin',true);return R}
+
+function simMS(a,N){a=a.slice();const n0=a.length,pad=(N-n0%N)%N,INF=Math.max(...a)+1;a=a.concat(Array(pad).fill(INF));const n=a.length,R=[],sz=[],off=[];let cmp=0,dv=0,o=0;
+ for(let i=0;i<N;i++){const s=Math.floor(n/N)+(i<n%N?1:0);sz.push(s);off.push(o);o+=s}
+ const push=(hl,log,t,done)=>R.push({kind:'bars',inf:INF,arr:a.slice(),sizes:sz,hl,log,title:t,done,stats:[['Comparaciones',cmp],['Mezclas/divisiones',dv]]});
+ push({},['Arreglo dividido en '+N+' bloques de '+n/N+' elementos'+(pad?` (se añadieron ${pad} centinela(s) ∞ para que n sea múltiplo de N; se descartan al final)`:'')],'Inicio');
+ let hl={},log=[];
+ for(let k=0;k<N;k++){const b=a.slice(off[k],off[k]+sz[k]);b.sort((x,y)=>{cmp++;return x-y});b.forEach((v,j)=>{a[off[k]+j]=v;hl[off[k]+j]=[k,false]});
+  log.push(`P${k+1}: QUICKSORT(S${k+1}) = [${b.join(', ')}]`)}
+ push(hl,log,'Paso 1 · ordenamiento local en paralelo');
+ const C=Math.ceil(N/2);
+ for(let c=1;c<=C;c++)for(let ph=0;ph<2;ph++){hl={};log=[];let k=0;
+  for(let i=ph;i+1<N;i+=2,k++){const L=a.slice(off[i],off[i]+sz[i]),Rr=a.slice(off[i+1],off[i+1]+sz[i+1]),m=[];let x=0,y=0,cc=0;
+   while(x<L.length&&y<Rr.length){cc++;m.push(L[x]<=Rr[y]?L[x++]:Rr[y++])}while(x<L.length)m.push(L[x++]);while(y<Rr.length)m.push(Rr[y++]);
+   cmp+=cc;dv++;m.forEach((v,j)=>a[off[i]+j]=v);
+   for(let j=0;j<sz[i]+sz[i+1];j++)hl[off[i]+j]=[k,false];
+   log.push(`P${k+1}: MERGE(S${i+1},S${i+2}) = [${m.join(', ')}] (${cc} comparaciones) → división: S${i+1}=[${m.slice(0,sz[i]).join(', ')}], S${i+2}=[${m.slice(sz[i]).join(', ')}]`)}
+  if(k)push(hl,log,`Ciclo ${c}/${C} · subfase ${ph?'2.2 pares':'2.1 impares'}`)}
+ const res=a.filter(v=>v!==INF);push({},['Resultado: '+res.join(', '),'Ordenado: '+res.every((v,i)=>!i||res[i-1]<=v)],'Fin',true);return R}
+
+function simBB(items,W){const it=items.map(([v,w])=>({v,w})).sort((a,b)=>b.v/b.w-a.v/a.w),n=it.length,cap=Math.floor(it.reduce((s,x)=>s+x.w,0)/2);
+ const bound=(l,wt,val)=>{let c=cap-wt,ub=val;for(let k=l;k<n;k++){if(it[k].w<=c){c-=it[k].w;ub+=it[k].v}else{ub+=it[k].v*c/it[k].w;break}}return -ub};
+ NODES=[{l:0,wt:0,val:0,p:-1,idx:0,g:bound(0,0,0)}];const st=['live'],R=[];let live=[0],z=0,best=0,cmp=0,ex=0,pr=0,rd=0;
+ const snap=(log,t,act)=>R.push({kind:'tree',n,nc:NODES.length,st:st.slice(),act,best,log,title:t,
+  stats:[['Comparaciones',cmp],['Nodos expandidos',ex],['Podas',pr],['z (incumbent)',z]],
+  info:`Capacidad C=${cap} · ítems ordenados por v/w: ${it.map(x=>x.v+':'+x.w).join(', ')}<br>Live-set: ${live.length?live.map(i=>`#${i}(g=${NODES[i].g.toFixed(1)})`).join(', '):'vacío'} · <span style="color:#2f6fed">●</span> vivo <span style="color:#9aa3b5">●</span> expandido <span style="color:#e6194b">●</span> podado <span style="color:#c9a800">●</span> hoja <span style="color:#3cb44b">●</span> mejor solución`});
+ snap([`Raíz #0: g=${NODES[0].g.toFixed(1)}; la raíz es solución factible, z=0`],'Inicio',{});
+ for(;;){live.sort((a,b)=>NODES[a].g-NODES[b].g);const batch=[];let pn='';
+  while(live.length&&batch.length<W){const id=live.shift();cmp++;if(NODES[id].g<z)batch.push(id);else{[id,...live].forEach(x=>{st[x]='pruned';pr++});pn=`Los vértices restantes tienen g ≥ z=${z}: se podan`;live=[];break}}
+  if(!batch.length){if(pn)snap([pn],'Poda final',{});break}
+  rd++;const log=[],act={};
+  batch.forEach((id,k)=>{const x=NODES[id];ex++;st[id]='exp';act[id]=k;log.push(`P${k+1} expande #${id} (nivel ${x.l}, peso ${x.wt}, valor ${x.val}, g=${x.g.toFixed(1)})`);
+   const o=[];if(x.wt+it[x.l].w<=cap)o.push([x.wt+it[x.l].w,x.val+it[x.l].v,0,'incluir']);else log.push(`   incluir ítem ${x.l+1}: no cabe`);o.push([x.wt,x.val,1,'excluir']);
+   o.forEach(([wt,val,b,nm])=>{const cid=NODES.length,l=x.l+1,c={l,wt,val,p:id,idx:x.idx*2+b};NODES.push(c);const f=-val;cmp++;let m=`   ${nm} → #${cid}, f=${f}`;
+    if(f<z){z=f;best=cid;m+=` < z ⇒ nueva cota z=${f}`}
+    if(l<n){c.g=bound(l,wt,val);cmp++;if(c.g<z){st[cid]='live';live.push(cid);m+=`; g=${c.g.toFixed(1)} < z ⇒ al live-set`}else{st[cid]='pruned';pr++;m+=`; g=${c.g.toFixed(1)} ≥ z ⇒ poda`}}
+    else{st[cid]='leaf';m+='; hoja'}log.push(m)})});
+  if(pn)log.push(pn);snap(log,`Ronda ${rd} (${batch.length} procesador(es))`,act)}
+ let p=best;const sel=[];while(p>0){if(NODES[p].idx%2===0)sel.push(NODES[p].l);p=NODES[p].p}
+ const last=R[R.length-1];R.push({...last,act:{},log:[`Óptimo: valor=${-z}`,`Ítems incluidos (orden v/w): ${sel.reverse().map(i=>it[i-1].v+':'+it[i-1].w).join(', ')||'ninguno'}`,`Rondas: ${rd}`],title:'Fin'});return R}
+
+function bars(f){const box=$('viz');box.innerHTML='';const mx=Math.max(...f.arr,1);let o=0;
+ f.sizes.forEach((s,b)=>{const g=document.createElement('div');g.className='blk';const w=document.createElement('div');w.className='bars';
+  for(let j=0;j<s;j++){const i=o+j,h=f.hl[i],d=document.createElement('div');d.className='bar'+(f.done?' ok':'');d.style.height=(10+f.arr[i]/mx*160)+'px';
+   if(h){d.style.background=COL[h[0]%8];if(h[1])d.classList.add('sw')}d.innerHTML='<span>'+(f.arr[i]===f.inf?'∞':f.arr[i])+'</span>';w.appendChild(d)}
+  g.appendChild(w);if(f.sizes.length>1){const l=document.createElement('div');l.className='lab';l.textContent='S'+(b+1);g.appendChild(l)}box.appendChild(g);o+=s})}
+
+function tree(f){const W=1000,H=30+f.n*46,r=Math.max(2.5,Math.min(8,W/2**f.n/2.2)),P=c=>[(c.idx+.5)/2**c.l*W,18+c.l*46],
+ C={live:'#2f6fed',exp:'#9aa3b5',pruned:'#e6194b',leaf:'#c9a800'};let s=`<svg viewBox="0 0 ${W} ${H}" width="100%">`;
+ for(let i=1;i<f.nc;i++){const a=P(NODES[i]),b=P(NODES[NODES[i].p]);s+=`<line x1="${b[0]}" y1="${b[1]}" x2="${a[0]}" y2="${a[1]}" stroke="#9aa3b5" opacity=".5"/>`}
+ for(let i=0;i<f.nc;i++){const p=P(NODES[i]),k=f.act[i],bst=i===f.best&&f.best>0;
+  s+=`<circle cx="${p[0]}" cy="${p[1]}" r="${bst?r+2:r}" fill="${bst?'#3cb44b':C[f.st[i]]}"${k!==undefined?` stroke="${COL[k%8]}" stroke-width="3"`:''}/>`;
+  if(k!==undefined)s+=`<text x="${p[0]+r+3}" y="${p[1]+4}" font-size="12" fill="${COL[k%8]}">P${k+1}</text>`}
+ $('viz').innerHTML=s+'</svg>'}
+
+function render(){const f=F[cur];$('step').textContent=`Paso ${cur}/${F.length-1} · ${f.title}`;
+ $('stats').innerHTML=f.stats.map(([k,v])=>`<span class="chip">${k}: <b>${v}</b></span>`).join('');
+ f.kind==='tree'?tree(f):bars(f);$('info').innerHTML=f.info||'';
+ let h='';for(let i=cur;i>=Math.max(0,cur-5);i--)h+=`<div class="lg${i==cur?' now':''}"><b>${esc(F[i].title)}</b><br>${F[i].log.map(esc).join('<br>')}</div>`;
+ $('log').innerHTML=h;$('prev').disabled=cur==0;$('next').disabled=cur>=F.length-1}
+
+function stop(){clearTimeout(timer);timer=null;$('play').textContent='▶ Animar'}
+function tick(){if(cur>=F.length-1){stop();return}cur++;render();timer=setTimeout(tick,1100-$('spd').value*10)}
+function build(){stop();const a=$('alg').value;let h=Math.max(1,+$('h').value||1);$('hint').textContent=HINT[a];
+ const t=$('arr').value.split(/[\s,;]+/).filter(Boolean);
+ if(a==='bb'){const it=t.map(s=>s.split(':').map(Number)).filter(p=>p.length===2&&p.every(x=>x>0)).slice(0,7);if(it.length<2){gen();return}h=Math.min(h,8);F=simBB(it,h)}
+ else{const v=t.map(Number).filter(Number.isFinite).slice(0,32);if(v.length<2){gen();return}
+  h=a==='ms'?Math.min(Math.max(h,2),8,v.length):Math.min(h,16);F=a==='oe'?simOE(v,h):simMS(v,h)}
+ $('h').value=h;cur=0;render()}
+function gen(){const a=$('alg').value;let n=+$('n').value||8;
+ if(a==='bb'){n=Math.max(2,Math.min(7,n));$('arr').value=Array.from({length:n},()=>rnd(5,40)+':'+rnd(2,15)).join(', ')}
+ else{n=Math.max(2,Math.min(32,n));$('arr').value=Array.from({length:n},()=>rnd(1,99)).join(', ')}
+ $('n').value=n;build()}
+$('gen').onclick=gen;$('apply').onclick=build;$('h').onchange=build;
+$('alg').onchange=()=>{$('n').value=$('alg').value==='bb'?6:12;gen()};
+$('reset').onclick=()=>{stop();cur=0;render()};
+$('prev').onclick=()=>{stop();if(cur>0){cur--;render()}};
+$('next').onclick=()=>{stop();if(cur<F.length-1){cur++;render()}};
+$('play').onclick=()=>{if(timer){stop();return}if(cur>=F.length-1)cur=0;$('play').textContent='⏸ Pausar';render();timer=setTimeout(tick,1100-$('spd').value*10)};
+gen();
+</script></body></html>
