@@ -24,6 +24,12 @@ button{cursor:pointer}button:disabled{opacity:.4;cursor:default}
 .lab{font-size:12px;color:var(--mut);margin-top:4px}
 #log{max-height:260px;overflow:auto;font-family:ui-monospace,monospace;font-size:12px}
 .lg{padding:5px 0;border-bottom:1px solid var(--bd);color:var(--mut)}.lg.now{color:var(--fg)}
+#pc{font:12px/1.5 ui-monospace,monospace;white-space:pre;overflow-x:auto}
+.pl{padding:0 6px;border-left:3px solid transparent;color:var(--mut)}.pl.on{background:#f5820533;border-left-color:#f58231;color:var(--fg)}
+.tb.on{background:#2f6fed;color:#fff;border-color:#2f6fed}
+#how{line-height:1.5}#how li{margin:3px 0}
+.q{margin:0 0 14px}.q button{display:block;margin:4px 0;text-align:left;width:100%}
+.good{background:#3cb44b33!important;border-color:#3cb44b!important}.bad{background:#e6194b33!important;border-color:#e6194b!important}
 </style></head><body>
 <h1>Simulador de algoritmos paralelos</h1>
 <div class="card row">
@@ -41,6 +47,8 @@ button{cursor:pointer}button:disabled{opacity:.4;cursor:default}
  <b id="step"></b>
 </div>
 <div class="card"><div id="stats"></div><div id="viz"></div><div id="info" class="mut"></div></div>
+<div class="card"><div class="row" style="margin-bottom:8px"><button class="tb on" data-t="pc">📜 Pseudocódigo</button><button class="tb" data-t="how">📖 Cómo funciona</button><button class="tb" data-t="qz">❓ Preguntas</button></div>
+<div id="pc"></div><div id="how" style="display:none"></div><div id="qz" style="display:none"></div></div>
 <div class="card"><b>Registro (comparaciones, divisiones y resultados)</b><div id="log"></div></div>
 <script>
 const $=id=>document.getElementById(id),COL=['#e6194b','#3cb44b','#f58231','#4363d8','#911eb4','#0aa5a5','#c9a800','#f032e6'];
@@ -113,9 +121,43 @@ function tree(f){const W=1000,H=30+f.n*46,r=Math.max(2.5,Math.min(8,W/2**f.n/2.2
   if(k!==undefined)s+=`<text x="${p[0]+r+3}" y="${p[1]+4}" font-size="12" fill="${COL[k%8]}">P${k+1}</text>`}
  $('viz').innerHTML=s+'</svg>'}
 
+
+const PC={
+oe:["procedure ODD-EVEN TRANSPOSITION (S)","  for j = 1 to ceil(n / 2) do","    /* Paso 1: Fase Impar */","    for i = 1, 3, ..., 2*floor(n/2) - 1 do in parallel","      if x_i > x_{i+1} then x_i <-> x_{i+1}","    end for","    /* Paso 2: Fase Par */","    for i = 2, 4, ..., 2*floor((n-1)/2) do in parallel","      if x_i > x_{i+1} then x_i <-> x_{i+1}","    end for","  end for","end procedure"],
+ms:["procedure MERGE SPLIT (S)","  /* Paso 1: Ordenamiento local paralelo */","  for i = 1 to N do in parallel","    QUICKSORT(S_i)","  end for","  /* Paso 2: Ciclos de Mezcla y División */","  for j = 1 to ceil(N / 2) do","    /* Subfase 2.1: Procesadores Impares */","    for i = 1, 3, ..., 2*floor(N/2) - 1 do in parallel","      SEQUENTIAL MERGE(S_i, S_{i+1}, S')","      S_i     <- {s'_1, ..., s'_{n/N}}","      S_{i+1} <- {s'_{n/N+1}, ..., s'_{2n/N}}","    end for","    /* Subfase 2.2: Procesadores Pares */","    for i = 2, 4, ..., 2*floor((N-1)/2) do in parallel","      SEQUENTIAL MERGE(S_i, S_{i+1}, S')","      S_i     <- {s'_1, ..., s'_{n/N}}","      S_{i+1} <- {s'_{n/N+1}, ..., s'_{2n/N}}","    end for","  end for","end procedure"],
+bb:["procedure Branch&Bound (S, f, g)","  for k = 1 to # of processors do status[k] = waiting","  live-set = {root}","  z = f(root) si root es solución, si no z = infinity","  while (live-set tiene x con g(x) < z OR hay procesadores busy) do","    I = # de vértices sin resolver en live-set","    J = # de procesadores con status = waiting","    W = Min(I, J)","    for w = 1 to W in parallel do","      x = vértice de live-set con g(x) mínimo","      delete x from live-set","      for each child y of x do","        if y es solución AND f(y) < z then z = f(y)","        if y no es hoja AND g(y) < z then add y to live-set","      end for","    end for","  end while","  Output(z)","end procedure"]};
+const HL={oe:t=>/impar/.test(t)?[1,2,3,4,5]:/par/.test(t)?[1,6,7,8,9]:t==='Inicio'?[0]:[11],
+ms:t=>/local/.test(t)?[1,2,3,4]:/2\.1/.test(t)?[6,7,8,9,10,11,12]:/2\.2/.test(t)?[6,13,14,15,16,17,18]:t==='Inicio'?[0]:[20],
+bb:t=>/^Ronda/.test(t)?[4,5,6,7,8,9,10,11,12,13]:t==='Poda final'?[4]:t==='Inicio'?[1,2,3]:[16,17]};
+const USO='<b>Cómo usar el simulador:</b><ul><li>Pulsa <i>Generar arreglo</i> (o escribe el tuyo y <i>Aplicar</i>) y elige los <i>Hilos</i>.</li><li><i>Paso ▶</i> avanza una acción, <i>◀ Atrás</i> retrocede, <i>▶ Animar</i> corre solo y <i>⏮ Reiniciar</i> vuelve al inicio.</li><li>En la pestaña <i>Pseudocódigo</i> se resalta la línea que se ejecuta; el <i>Registro</i> detalla cada comparación, división y resultado.</li></ul>';
+const HOW={
+oe:'<b>Idea:</b> n procesadores en línea, cada uno con un elemento. Se alternan dos fases: en la <b>impar</b> se comparan los pares (1,2),(3,4)…; en la <b>par</b>, los pares (2,3),(4,5)…. Cada pareja se ordena (si x<sub>i</sub> &gt; x<sub>i+1</sub> se intercambian) y todas las parejas de una fase son independientes, por eso pueden ir en paralelo.<ul><li>Se hacen ⌈n/2⌉ ciclos de dos fases = <b>n fases</b> en total.</li><li>Tiempo paralelo ideal: <b>O(n)</b> con n procesadores; secuencial: O(n²).</li><li>En el simulador, <i>Hilos</i> = comparaciones simultáneas por paso (cada hilo, un color; borde grueso = intercambio).</li><li>Nota: el límite de la fase impar del pseudocódigo original omitía el último par si n es par; aquí se corrigió.</li></ul>'+USO,
+ms:'<b>Idea:</b> el arreglo se divide en N bloques S<sub>1</sub>…S<sub>N</sub> (uno por procesador). Primero cada procesador ordena su bloque (QUICKSORT). Luego se repite la transposición impar-par pero con <b>bloques</b>: cada pareja (S<sub>i</sub>, S<sub>i+1</sub>) se <b>mezcla</b> en una lista ordenada S\' y se <b>divide</b>: S<sub>i</sub> se queda con los n/N menores y S<sub>i+1</sub> con los n/N mayores.<ul><li>⌈N/2⌉ ciclos × 2 subfases = N subfases de mezcla-división.</li><li>Tiempo paralelo ≈ (n/N)·log(n/N) + O(n).</li><li>Requiere bloques de igual tamaño: si n no es múltiplo de N se añaden centinelas ∞ que se descartan al final.</li><li><i>Hilos</i> = N procesadores (2 a 8); cada pareja que se mezcla comparte color.</li></ul>'+USO,
+bb:'<b>Idea:</b> se explora el árbol de decisiones del problema (mochila 0/1: incluir o excluir cada ítem). Un <b>live-set</b> guarda los vértices por explorar; <b>g(x)</b> es una cota inferior del mejor f alcanzable desde x y <b>z</b> es la mejor solución conocida (incumbent). En cada ronda se expanden en paralelo W = min(I, J) vértices con menor g.<ul><li><b>Poda:</b> si g(y) ≥ z, el vértice no puede mejorar a z y se descarta.</li><li>Cada solución factible con f(y) &lt; z actualiza la cota global z.</li><li>Termina cuando ningún vértice del live-set tiene g &lt; z; la salida es z (aquí f = −valor, se minimiza).</li><li><i>Hilos</i> = W procesadores; el árbol muestra vivos, expandidos, podados, hojas y la mejor solución.</li></ul>'+USO};
+const Q={
+oe:[{q:'¿Cuántas fases (impar + par) hacen falta para ordenar n elementos?',o:['n/2','n','n log n','n²'],a:1,w:'⌈n/2⌉ ciclos × 2 fases = n fases.'},
+{q:'En la fase impar (1-indexado), ¿qué pares se comparan?',o:['(2,3), (4,5), …','(1,3), (2,4), …','(1,2), (3,4), …','Todos los pares'],a:2,w:'La fase impar empieza en el elemento 1: (1,2), (3,4)…; la par usa (2,3), (4,5)….'},
+{q:'Con n procesadores (uno por elemento), ¿cuál es el tiempo paralelo ideal?',o:['O(log n)','O(n²)','O(1)','O(n)'],a:3,w:'Son n fases y cada una cuesta O(1) porque todos los pares se comparan a la vez.'}],
+ms:[{q:'Tras mezclar S_i y S_{i+1}, ¿qué recibe S_i?',o:['Los n/N elementos mayores','Los n/N elementos menores','La mezcla completa','Nada: queda igual'],a:1,w:'S_i recibe la mitad menor y S_{i+1} la mitad mayor de la mezcla.'},
+{q:'¿Por qué se ordena cada bloque antes de empezar las mezclas?',o:['Para acelerar la animación','Para evitar intercambios','Porque la mezcla secuencial exige dos listas ya ordenadas','No es necesario'],a:2,w:'MERGE solo produce una lista ordenada si ambas entradas ya lo están.'},
+{q:'¿Cuántas subfases de mezcla-división hay con N procesadores?',o:['log N','2N','N/4','N'],a:3,w:'⌈N/2⌉ ciclos con dos subfases cada uno: N en total.'}],
+bb:[{q:'¿Qué representa g(x)?',o:['El valor exacto de f(x)','Una cota inferior del mejor f alcanzable desde x','El número de hijos de x','El tiempo de expansión'],a:1,w:'g(x) acota por abajo lo mejor que se puede lograr desde x; sirve para podar.'},
+{q:'¿Cuándo se poda un vértice y?',o:['Cuando g(y) < z','Cuando es un vértice hoja','Cuando g(y) ≥ z','Cuando tiene dos hijos'],a:2,w:'Si g(y) ≥ z, ningún descendiente puede mejorar la mejor solución z.'},
+{q:'¿Qué significa W = Min(I, J)?',o:['Se usa siempre un único procesador','Se expanden tantos vértices como haya disponibles y procesadores en espera','Se podan W vértices por ronda','W es la profundidad del árbol'],a:1,w:'I = vértices por resolver, J = procesadores en espera: no se puede expandir más de lo que alguno de los dos permite.'}]};
+
+function pcode(f){const a=$('alg').value,h=HL[a](f.title);$('pc').innerHTML=PC[a].map((l,i)=>`<div class="pl${h.includes(i)?' on':''}">${esc(l)||' '}</div>`).join('')}
+function quiz(){const a=$('alg').value;let ok=0;const box=$('qz');box.innerHTML='<div class="mut"><span id="sc"></span> <button onclick="quiz()">Reintentar</button></div>';
+ $('sc').textContent='Responde las preguntas (0/'+Q[a].length+')';
+ Q[a].forEach((q,qi)=>{const d=document.createElement('div');d.className='q';d.innerHTML=`<b>${qi+1}. ${esc(q.q)}</b>`;
+  q.o.forEach((o,oi)=>{const b=document.createElement('button');b.textContent=o;b.onclick=()=>{if(d.dataset.done)return;d.dataset.done=1;const g=oi===q.a;if(g)ok++;
+   b.classList.add(g?'good':'bad');if(!g)d.children[q.a+1].classList.add('good');
+   const e=document.createElement('div');e.className='mut';e.textContent=(g?'✔ Correcto. ':'✘ Incorrecto. ')+q.w;d.appendChild(e);$('sc').textContent=`Aciertos: ${ok}/${Q[a].length}`};d.appendChild(b)});box.appendChild(d)})}
+function buildSide(){$('how').innerHTML=HOW[$('alg').value];quiz()}
+document.querySelectorAll('.tb').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tb').forEach(x=>x.classList.toggle('on',x===b));['pc','how','qz'].forEach(id=>$(id).style.display=id===b.dataset.t?'block':'none')});
+
 function render(){const f=F[cur];$('step').textContent=`Paso ${cur}/${F.length-1} · ${f.title}`;
  $('stats').innerHTML=f.stats.map(([k,v])=>`<span class="chip">${k}: <b>${v}</b></span>`).join('');
- f.kind==='tree'?tree(f):bars(f);$('info').innerHTML=f.info||'';
+ f.kind==='tree'?tree(f):bars(f);pcode(f);$('info').innerHTML=f.info||'';
  let h='';for(let i=cur;i>=Math.max(0,cur-5);i--)h+=`<div class="lg${i==cur?' now':''}"><b>${esc(F[i].title)}</b><br>${F[i].log.map(esc).join('<br>')}</div>`;
  $('log').innerHTML=h;$('prev').disabled=cur==0;$('next').disabled=cur>=F.length-1}
 
@@ -132,10 +174,10 @@ function gen(){const a=$('alg').value;let n=+$('n').value||8;
  else{n=Math.max(2,Math.min(32,n));$('arr').value=Array.from({length:n},()=>rnd(1,99)).join(', ')}
  $('n').value=n;build()}
 $('gen').onclick=gen;$('apply').onclick=build;$('h').onchange=build;
-$('alg').onchange=()=>{$('n').value=$('alg').value==='bb'?6:12;gen()};
+$('alg').onchange=()=>{$('n').value=$('alg').value==='bb'?6:12;buildSide();gen()};
 $('reset').onclick=()=>{stop();cur=0;render()};
 $('prev').onclick=()=>{stop();if(cur>0){cur--;render()}};
 $('next').onclick=()=>{stop();if(cur<F.length-1){cur++;render()}};
 $('play').onclick=()=>{if(timer){stop();return}if(cur>=F.length-1)cur=0;$('play').textContent='⏸ Pausar';render();timer=setTimeout(tick,1100-$('spd').value*10)};
-gen();
+buildSide();gen();
 </script></body></html>
